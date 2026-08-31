@@ -316,6 +316,7 @@ Non-`ok` responses carry two fields:
 | `subscription_expired` | fail | the user's entitlement has lapsed → "renew" CTA. (Named to stay disjoint from `user_status: expired` — §5.2 — so no token belongs to two fields.) A `subscription_expired` fail on `generate_pro_proof` additionally carries the three top-level account fields — **`account_expiry_ts`** (now in the past), **`account_grace_period_duration`** and **`account_auto_renewing`** (§2.2) — so the client can refresh its cached state without a separate `get_pro_status`; other slugs do not. |
 | `not_subscribed` | fail | no entitlement on record (never subscribed, or pruned after long inactivity) → "subscribe" CTA. |
 | `revoked` | fail | the user's current entitlement was revoked. Treat as `subscription_expired` (renew) on clients today; the distinct slug is reserved for a future revoked-specific flow. |
+| `rate_limited` | fail | too many proofs have been issued to this account in the current window (`generate_pro_proof` only). The entitlement is intact — this is a per-account issuance limit, not an expiry — so a client should keep its existing proof and retry later rather than treating the account as lapsed. Disabled by default; a correct client on one account will not normally see it. |
 | `internal_error` | error | backend fault; not the client's doing. |
 
 ### 5.2 Result payloads

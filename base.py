@@ -181,6 +181,16 @@ def unix_seconds_float_from_datetime(value: pendulum.DateTime) -> float:
 # clock runs. A compressed clock changes how long a subscription lasts, not when a client wakes up.
 RENEWAL_LATENCY_ALLOWANCE: pendulum.Duration = 1 * HOUR
 
+# The span a proof-issuance count covers before it restarts. Anchored per account on the issue that opened
+# the window, not on a shared grid — a rate is being measured, and nothing compares one account's window to
+# another's.
+#
+# Seven days is long enough that a legitimate account's whole renewal cycle sits inside one window (proofs
+# run to ~30 days, so a client's renewal timer fires well under once a week) and short enough that a seed
+# handed to a fleet exceeds any sane cap within one. The cap itself is config — see
+# `MAX_PROOFS_PER_WINDOW`, which is 0/unlimited unless an operator sets it.
+PROOF_ISSUE_WINDOW: pendulum.Duration = 7 * DAY
+
 # NOTE: Global variables
 UNSAFE_LOGGING = False
 
@@ -190,6 +200,12 @@ UNSAFE_LOGGING = False
 # It does NOT fabricate payments — a real witnessed payment must still exist — so it is not a "grant
 # arbitrary Pro" backdoor; worst-case misuse breaks real subscriptions, it does not mint entitlements.
 PROVIDER_DRY_RUN = False
+
+# How many proofs one account may be issued per `PROOF_ISSUE_WINDOW`. 0 = unlimited, and that is the
+# default: the counters are for SEEING the traffic first — a cap set before anyone has looked at real
+# numbers would refuse legitimate users on a guess. Settable as `max_proofs_per_window` in the [base]
+# config, applied on read so raising or lowering it takes effect without touching a stored row.
+MAX_PROOFS_PER_WINDOW: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -419,6 +435,7 @@ class ErrorCode(enum.StrEnum):
     subscription_expired = 'subscription_expired'  # fail:  the user's entitlement has lapsed
     not_subscribed = 'not_subscribed'  # fail:  no entitlement on record (never subscribed / pruned)
     revoked = 'revoked'  # fail:  the user's current entitlement was revoked
+    rate_limited = 'rate_limited'  # fail:  too many proofs issued to this account this window
     internal_error = 'internal_error'  # error: backend fault
 
 

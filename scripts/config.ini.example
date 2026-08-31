@@ -49,6 +49,17 @@ with_provider_google_play  = false
 ; days), because it extends every renewing subscriber's entitlement and a units slip would be expensive.
 ; renewal_latency_allowance = 3600
 
+; max_proofs_per_window: how many Pro proofs ONE account may be issued per 7-day window. Defaults to 0,
+; meaning unlimited -- the backend still counts every issue either way, so the numbers are there to look at
+; before a limit is chosen. A legitimate account re-fetches on its own renewal timer (about an hour before
+; a ~30-day proof expiry) times its device count, so its weekly count is a handful; a master seed extracted
+; into a modified client and handed around is what makes this large, because a proof is a bearer credential
+; and nothing downstream can tell a subscriber's from a copy. Set it well above real traffic before turning
+; it on -- past the limit an account is refused with `rate_limited` until its window rolls, and each breach
+; logs a WARNING naming the account. Refused requests are not counted, so a lapsed account cannot consume
+; another's headroom.
+; max_proofs_per_window = 0
+
 ; Optional outbound notification webhooks; add [session_webhook.1], etc. as needed.
 ; [session_webhook.0]
 ; enabled = true

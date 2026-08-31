@@ -92,6 +92,10 @@ USERS_COLUMNS = ", ".join(
         "COALESCE(u.grace_period, '0'::interval) AS grace_period",
         "u.auto_renewing",
         "u.proof_expiry_offset",
+        "u.proofs_issued_total",
+        "u.proofs_issued_window",
+        "u.proofs_issued_past_expiry_window",
+        "u.proofs_window_start",
     )
 )
 USERS_FROM = "users u JOIN generations g ON g.id = u.current_generation_id"
@@ -328,6 +332,17 @@ class UserRow:
     # Re-drawn when `expiry_at` EXTENDS, and whenever a generation is minted; a shrink keeps it. See
     # _offset_redrawn_if_expiry_extends for why, and _build_proof_clamped_expiry_time for what it buys.
     proof_expiry_offset: int = 0
+
+    # How many proofs this account has been issued, ever and in the current window, and how many of that
+    # window's were issued past its expiry (a SUBSET of `proofs_issued_window`, not a separate bucket). See
+    # `_record_proof_issued` for what advances them, `_ensure_active_generation` for the one thing that
+    # clears the window, and `schema/009_proof_issue_counters.sql` for why they exist.
+    # `proofs_window_start` is None when no window is open, which is not the same fact as one that opened
+    # at the epoch.
+    proofs_issued_total: int = 0
+    proofs_issued_window: int = 0
+    proofs_issued_past_expiry_window: int = 0
+    proofs_window_start: pendulum.DateTime | None = None
 
 
 @dataclasses.dataclass
@@ -778,6 +793,10 @@ def user_row_from_dict(row: dict[str, typing.Any]) -> UserRow:
         grace_period=row['grace_period'],
         auto_renewing=bool(row['auto_renewing']),
         proof_expiry_offset=row['proof_expiry_offset'],
+        proofs_issued_total=row['proofs_issued_total'],
+        proofs_issued_window=row['proofs_issued_window'],
+        proofs_issued_past_expiry_window=row['proofs_issued_past_expiry_window'],
+        proofs_window_start=row['proofs_window_start'],
     )
 
 
@@ -2286,6 +2305,22 @@ def _ensure_active_generation(
     # be protecting proofs that were just revoked, so there is no served expiry left to undercut.
     offset_value = '%(proof_random_offset)s' if minted else _offset_redrawn_if_expiry_extends(lookup.best_expiry)
 
+    # A minted generation revokes every proof this account is holding, so all of its devices must re-fetch
+    # at once — and those re-fetches are the SAME installs the window has already counted. Restarting it
+    # with the tag stops an account being charged for an invalidation WE performed, which is what would
+    # otherwise make a refund-then-resubscribe, or any billing arc that revokes, look like a fleet.
+    #
+    # Only on a mint. A renewal or a stacked payment reuses the generation, so the tag is unchanged and
+    # existing proofs stay valid: no re-fetch is forced, and there is nothing to forgive. Resetting on every
+    # payment would hand the same monthly amnesty to an account being shared, which does renew.
+    window_reset = (
+        ',\n               proofs_issued_window = 0'
+        ',\n               proofs_issued_past_expiry_window = 0'
+        ',\n               proofs_window_start = NULL'
+        if minted
+        else ''
+    )
+
     db.query(
         tx.conn,
         f'''
@@ -2294,7 +2329,7 @@ def _ensure_active_generation(
                expiry_at                   = %(expiry)s,
                grace_period                 = %(grace)s,
                auto_renewing                = %(auto_renewing)s,
-               proof_expiry_offset          = {offset_value}
+               proof_expiry_offset          = {offset_value}{window_reset}
         WHERE  id = %(user_id)s
     ''',
         gen_id=result.generation_id,
@@ -2616,6 +2651,52 @@ def revoke_master_pkey_proofs_and_allocate_new_gen_id(
     return result
 
 
+def _record_proof_issued(tx: db.SQLTransaction, user_id: int, issued_at: pendulum.DateTime, past_expiry: bool) -> int:
+    """Count one proof against `user_id` and return how many of this window's are subject to the limit.
+
+    `past_expiry` says the account was past its paid-through instant when it asked — covered by store
+    grace, our allowance, or the proof over-provision. Those are counted separately and are NOT what the
+    return value reports, because in that regime the proof expiry is pinned: every re-fetch hands back the
+    identical value, so a client whose renewal target has fallen inside the window re-asks indefinitely
+    having been given nothing to act on. It is a paying subscriber with a late renewal, and no threshold
+    can separate its traffic from a fleet's — see `schema/009_proof_issue_counters.sql`.
+
+    One statement, deliberately: the read-modify-write happens under the row lock the UPDATE takes, so two
+    proof requests racing for one account each count once. Reading the row first and writing back a
+    computed value would let concurrent requests — exactly what a shared seed produces — lose increments
+    against each other, which is the case the counters exist to measure.
+
+    The window restarts from `issued_at` rather than from `window_start + PROOF_ISSUE_WINDOW`: a rate is
+    being measured, so an account that goes quiet for a month starts a fresh window on its next proof
+    instead of being credited for the windows it sat out."""
+    row = db.query_one(
+        tx.conn,
+        '''
+        UPDATE users
+        SET    proofs_issued_total  = proofs_issued_total + 1,
+               proofs_issued_window = CASE WHEN proofs_window_start IS NULL
+                                             OR %(now)s >= proofs_window_start + %(window)s
+                                           THEN 1 ELSE proofs_issued_window + 1 END,
+               proofs_issued_past_expiry_window =
+                                      CASE WHEN proofs_window_start IS NULL
+                                             OR %(now)s >= proofs_window_start + %(window)s
+                                           THEN %(past_expiry)s::int
+                                           ELSE proofs_issued_past_expiry_window + %(past_expiry)s::int END,
+               proofs_window_start  = CASE WHEN proofs_window_start IS NULL
+                                             OR %(now)s >= proofs_window_start + %(window)s
+                                           THEN %(now)s ELSE proofs_window_start END
+        WHERE  id = %(user_id)s
+        RETURNING proofs_issued_window - proofs_issued_past_expiry_window
+        ''',
+        now=issued_at,
+        window=base.PROOF_ISSUE_WINDOW,
+        past_expiry=past_expiry,
+        user_id=user_id,
+    )
+    assert row is not None, f'proof issued for user {user_id} that does not exist'
+    return row[0]
+
+
 @db.transactional
 def build_current_entitlement_proof(
     tx: db.SQLTransaction,
@@ -2679,6 +2760,36 @@ def build_current_entitlement_proof(
                 'account_grace_period_duration': base.seconds_from_duration(account_grace_span(get_user.user)),
                 'account_auto_renewing': get_user.user.auto_renewing,
             },
+        )
+
+    # Counted only once every entitlement check above has passed, so the counters measure proofs ISSUED
+    # rather than requests attempted: a lapsed or revoked account hammering the endpoint never advances
+    # them, and a cap can never be consumed by requests that were going to be refused anyway.
+    #
+    # Incremented BEFORE signing, and the cap judged on the value the UPDATE returns, so the check and the
+    # count are one atomic step — a fleet sharing one seed cannot slip past a cap by racing. Raising here
+    # rolls the increment back with the rest of the transaction, which is what keeps a refused request from
+    # advancing the count it was refused by.
+    #
+    # `past_expiry` splits the count rather than the cap: a request from an account past its paid term is
+    # recorded, and visibly so, but is not what the limit is judged on. Every renewing account crosses that
+    # line on every billing cycle — the last proof before the term end always expires after it, so the
+    # client's next wake is always on the far side — and while it is there the proof expiry is pinned, so a
+    # late renewal turns one wake into an unbounded retry loop that no cap could survive.
+    issued_this_window = _record_proof_issued(
+        tx, get_user.user.id, request_at, past_expiry=request_at > get_user.user.expiry_at
+    )
+    if base.MAX_PROOFS_PER_WINDOW and issued_this_window > base.MAX_PROOFS_PER_WINDOW:
+        # WARNING, not INFO: with a cap configured at all this cannot happen to an account renewing on its
+        # own timer, so a line here means either a seed in circulation or a cap set too low. Both want a
+        # human.
+        log.warning(
+            f'Proof rate limit hit (master={base.maybe_obfuscate_bytes(master_pkey)}, '
+            f'{issued_this_window} > {base.MAX_PROOFS_PER_WINDOW} per {base.PROOF_ISSUE_WINDOW.in_words()})'
+        )
+        raise base.FailError(
+            f'User {bytes(master_pkey).hex()} has been issued too many proofs this window',
+            code=base.ErrorCode.rate_limited,
         )
 
     proof = build_proof(

@@ -38,6 +38,8 @@ def entry_point() -> flask.Flask:
     db.set_dsn(parsed_args.db_url)
     base.RENEWAL_LATENCY_ALLOWANCE = parsed_args.renewal_latency_allowance
     base.PROVIDER_DRY_RUN = parsed_args.provider_dry_run
+    # Only this process issues proofs, so the mules have no use for it.
+    base.MAX_PROOFS_PER_WINDOW = parsed_args.max_proofs_per_window
 
     # NOTE: log_path is deliberately ignored here. Under uWSGI the vassal's `logto` already captures
     # this process's stdout/stderr into the log file and rotates it (log-maxsize/log-backupname); a

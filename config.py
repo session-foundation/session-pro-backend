@@ -59,6 +59,11 @@ class ParsedArgs:
     # How long a renewing subscription is honoured past its paid-through instant while we wait to learn
     # whether it renewed. Ours, not a store's — see base.RENEWAL_LATENCY_ALLOWANCE.
     renewal_latency_allowance: pendulum.Duration = base.RENEWAL_LATENCY_ALLOWANCE
+
+    # How many proofs one account may be issued per base.PROOF_ISSUE_WINDOW; 0 = unlimited. See
+    # base.MAX_PROOFS_PER_WINDOW for why unlimited is the default.
+    max_proofs_per_window: int = base.MAX_PROOFS_PER_WINDOW
+
     # `[logging] level` -- the level every logger gets unless named individually below. INFO rather
     # than DEBUG so a fresh deploy is production-shaped: DEBUG adds a line per provider notification.
     log_level: int = logging.INFO
@@ -132,6 +137,13 @@ def parse_args() -> ParsedArgs:
                     )
                 else:
                     result.renewal_latency_allowance = base.duration_from_seconds(allowance_s)
+
+        max_proofs = base_section.getint(option='max_proofs_per_window', fallback=None)
+        if max_proofs is not None:
+            if max_proofs < 0:
+                errors.append(f'max_proofs_per_window must not be negative (0 = unlimited), got {max_proofs}')
+            else:
+                result.max_proofs_per_window = max_proofs
 
         window_s = base_section.getint(option='voucher_processing_window', fallback=None)
         if window_s is not None:
