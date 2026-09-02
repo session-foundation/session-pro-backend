@@ -235,7 +235,7 @@ AddRevocationIterator: typing.TypeAlias = tuple[
 
 GoogleUnhandledNotificationIterator: typing.TypeAlias = tuple[
     str, str | None, pendulum.DateTime  # message_id (opaque string)  # payload
-]  # expiry_at
+]  # event_at
 
 
 @dataclasses.dataclass
@@ -2918,11 +2918,16 @@ def delete_expired_apple_notification_uuids(conn: psycopg.Connection, now: pendu
 
 
 def delete_expired_google_notifications(conn: psycopg.Connection, now: pendulum.DateTime) -> int:
-    """Delete handled Google notification-history rows whose expiry has passed, returning the number
+    """Delete handled Google notification-history rows past the retention window, returning the number
     removed. An unhandled row is kept regardless of age: it is the record that the notification still
-    owes processing."""
+    owes processing.
+
+    The window is applied here rather than stored on the row, so changing it moves every row at once
+    instead of only the ones written after the change."""
     return db.query(
-        conn, '''DELETE FROM google_notification_history WHERE %s >= expires_at AND handled = TRUE''', now
+        conn,
+        '''DELETE FROM google_notification_history WHERE event_at <= %(cutoff)s AND handled = TRUE''',
+        cutoff=now - base.GOOGLE_NOTIFICATION_RETAIN_FOR,
     ).rowcount
 
 
@@ -3021,7 +3026,7 @@ def apple_set_notification_checkpoint_at(tx: db.SQLTransaction, checkpoint_at: p
 
 
 @db.transactional
-def google_add_notification_id(tx: db.SQLTransaction, message_id: str, expires_at: pendulum.DateTime, payload: str):
+def google_add_notification_id(tx: db.SQLTransaction, message_id: str, event_at: pendulum.DateTime, payload: str):
     maybe_payload: str | None = None
     if len(payload):
         maybe_payload = payload
@@ -3033,13 +3038,13 @@ def google_add_notification_id(tx: db.SQLTransaction, message_id: str, expires_a
         # pass the check, and the loser would raise on the primary key — turning a duplicate delivery, which
         # is normal, into a nacked message and a redelivery. Recording it once is the whole requirement.
         ('''
-            INSERT INTO google_notification_history (message_id, handled, payload, expires_at)
-            VALUES      (%(message_id)s, FALSE, %(payload)s, %(expiry)s)
+            INSERT INTO google_notification_history (message_id, handled, payload, event_at)
+            VALUES      (%(message_id)s, FALSE, %(payload)s, %(event_at)s)
             ON CONFLICT (message_id) DO NOTHING
     '''),
         message_id=message_id,
         payload=maybe_payload,
-        expiry=expires_at,
+        event_at=event_at,
     )
 
 
@@ -3060,7 +3065,7 @@ def google_get_unhandled_notification_iterator(
     tx: db.SQLTransaction,
 ) -> collections.abc.Iterator[GoogleUnhandledNotificationIterator]:
     result_set = db.query(
-        tx.conn, ('SELECT message_id, payload, expires_at FROM google_notification_history WHERE NOT handled')
+        tx.conn, ('SELECT message_id, payload, event_at FROM google_notification_history WHERE NOT handled')
     )
     return typing.cast(collections.abc.Iterator[GoogleUnhandledNotificationIterator], result_set)
 

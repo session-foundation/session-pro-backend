@@ -90,6 +90,13 @@ REVOCATION_EFFECTIVE_DELAY: pendulum.Duration = REVOCATION_POLL_INTERVAL + 2 * H
 # (asserted below, once the proof-expiry shape is defined).
 REVOCATION_RETAIN_FOR: pendulum.Duration = 31 * DAY
 
+# How long a HANDLED Google notification-history row is kept. It has to outlast Pub/Sub's message
+# retention (7 days by default), which bounds how late a redelivery of an already-handled message can
+# arrive and still need to be recognised as one; the extra day is margin on a window Google sets and we do
+# not control. Unhandled rows are exempt from the prune at any age — they are the replay backlog. Applied
+# on read, never written to the row: the row records Google's event instant and nothing of ours.
+GOOGLE_NOTIFICATION_RETAIN_FOR: pendulum.Duration = 8 * DAY
+
 # Every instant in this codebase is a tz-aware pendulum `DateTime` and every duration a `Duration`. Integer
 # epochs live ONLY in the converters below, at two kinds of boundary with distinct units:
 #   - MILLISECONDS: the payment providers (Apple/Google App Store APIs) genuinely speak ms, so their

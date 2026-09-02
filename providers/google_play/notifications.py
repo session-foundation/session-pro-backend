@@ -552,12 +552,12 @@ def _handle_streamed_message(message: typing.Any) -> None:
                 # (someone cleared it out-of-band) and acks. A message that reaches processing without its
                 # row would therefore be acked unprocessed, and an acked notification is never redelivered.
                 #
-                # Stored as JSON because a message that needs this row needs a human to read it. Retention
-                # is our own 8 days against Pub/Sub's 7, so the row outlives the store's copy.
+                # Stored as JSON because a message that needs this row needs a human to read it. `event_at`
+                # is Google's own instant, verbatim: the prune applies our retention window to it on read.
                 backend.google_add_notification_id(
                     tx,
                     message_id=message.message_id,
-                    expires_at=base.datetime_from_unix_ms(parse.event_time_ms + base.MILLISECONDS_IN_DAY * 8),
+                    event_at=base.datetime_from_unix_ms(parse.event_time_ms),
                     payload=json.dumps({'data': message.data.decode('utf-8', errors='replace')}),
                 )
 

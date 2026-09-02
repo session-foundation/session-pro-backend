@@ -473,6 +473,36 @@ def test_a_streamed_notification_that_fails_to_handle_is_nacked(monkeypatch, pg_
         assert handled is False, 'recorded, but not marked done -- so a redelivery retries it'
 
 
+def test_the_history_row_records_googles_instant_and_the_prune_applies_our_window(monkeypatch, pg_database):
+    # `event_at` is Google's `eventTimeMillis` verbatim; the retention window is applied by the prune
+    # rather than added before the INSERT. The difference is invisible until the window moves -- a stored
+    # deadline leaves every existing row on the value it was written with -- so it needs pinning here.
+    with TestingContext(pg_database) as ctx:
+        monkeypatch.setattr('providers.google_play.api.package_name', 'network.loki.messenger')
+        event_ms = 1767225600000
+        event_at = base.datetime_from_unix_ms(event_ms)
+
+        google_play.notifications._handle_streamed_message(
+            _FakeStreamedMessage(data=_rtdn_bytes('tok-pruned', event_ms=event_ms), message_id='msg-handled')
+        )
+
+        with ctx.connection() as conn:
+            with db.transaction(conn) as tx:
+                backend.google_add_notification_id(tx, 'msg-unhandled', event_at, '{}')
+
+            stored = db.query_scalar(
+                conn, 'SELECT event_at FROM google_notification_history WHERE message_id = %s', 'msg-handled'
+            )
+            assert stored == event_at, 'the notification instant, not that instant plus our window'
+
+            deadline = event_at + base.GOOGLE_NOTIFICATION_RETAIN_FOR
+            assert backend.delete_expired_google_notifications(conn, now=deadline - base.HOUR) == 0
+            assert backend.delete_expired_google_notifications(conn, now=deadline) == 1
+
+            remaining = [r[0] for r in db.query(conn, 'SELECT message_id FROM google_notification_history')]
+        assert remaining == ['msg-unhandled'], 'an unhandled row is the replay backlog, and ages out at no window'
+
+
 def test_a_token_that_never_reconciles_is_parked_rather_than_retried_forever(pg_database):
     # Without a cap a permanently-broken token retries at the six-hour ceiling indefinitely: four Play API
     # fetches a day, forever, for a purchase that will never register. That is one row's worth of waste in

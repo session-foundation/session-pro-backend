@@ -109,7 +109,7 @@ def test_google_process_notification_message(monkeypatch, pg_database):
     # `error_report`. Both are deleted: the bit was not actionable by a user, and a handling failure rolled
     # it back anyway. A stuck purchase is now visible as `attempts`/`last_error` on its reconcile-queue row.
     now_s = 1_600_000_000.0
-    expiry = base.datetime_from_unix_ms(int(now_s * 1000) + base.MILLISECONDS_IN_DAY)
+    event_at = base.datetime_from_unix_ms(int(now_s * 1000))
 
     def make_msg(message_id: str, token: str):
         return google_play.notifications.SortedMessage(
@@ -150,7 +150,7 @@ def test_google_process_notification_message(monkeypatch, pg_database):
         )
         with ctx.connection() as conn:
             with db.transaction(conn) as tx:
-                backend.google_add_notification_id(tx, 'm-done', expiry, '')
+                backend.google_add_notification_id(tx, 'm-done', event_at, '')
                 backend.google_set_notification_handled(tx, message_id='m-done', delete=False)
             assert (
                 google_play.notifications._process_notification_message(
@@ -165,7 +165,7 @@ def test_google_process_notification_message(monkeypatch, pg_database):
         )
         with ctx.connection() as conn:
             with db.transaction(conn) as tx:
-                backend.google_add_notification_id(tx, 'm-ok', expiry, '')
+                backend.google_add_notification_id(tx, 'm-ok', event_at, '')
             assert (
                 google_play.notifications._process_notification_message(
                     conn, make_msg('m-ok', 'tok-c'), base.ErrorSink(), now_s
@@ -181,7 +181,7 @@ def test_google_process_notification_message(monkeypatch, pg_database):
         )
         with ctx.connection() as conn:
             with db.transaction(conn) as tx:
-                backend.google_add_notification_id(tx, 'm-fail', expiry, '')
+                backend.google_add_notification_id(tx, 'm-fail', event_at, '')
             assert (
                 google_play.notifications._process_notification_message(
                     conn, make_msg('m-fail', 'tok-d'), base.ErrorSink(), now_s
